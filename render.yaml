@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ivasms-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: PORT
+        value: "10000"
+      - key: IVASMS_EMAIL
+        sync: false
+      - key: IVASMS_PASSWORD
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+    healthCheckPath: /
+    healthCheckInterval: 60
+    healthCheckTimeout: 30
