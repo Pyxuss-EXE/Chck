@@ -21,8 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Admin IDs
-ADMIN_IDS = [5326153007]
+# Admin IDs - Updated as requested
+ADMIN_IDS = [5326153007]  # Your admin ID
 bot_users = set()
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -47,23 +47,26 @@ def run_health_server():
 health_thread = threading.Thread(target=run_health_server, daemon=True)
 health_thread.start()
 
-BANNER_URL = "https://files.catbox.moe/koc535.jpg"
-
+# Updated keyboard with your channels
 def get_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📢 Channel", url="https://t.me/pyxuss_sms")],
-        [InlineKeyboardButton("👥 Group", url="https://t.me/+sT7TU1EAX_w3ZjFl")],
+        [InlineKeyboardButton(" Channel", url="https://t.me/pyxuss_sms")],
+        [InlineKeyboardButton(" Group", url="https://t.me/+sT7TU1EAX_w3ZjFl")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+def get_powered_by():
+    return f"�  xs {datetime.now().year}"
 
 class IVASMSMonitor:
     def __init__(self):
         self.email = os.getenv("IVASMS_EMAIL")
         self.password = os.getenv("IVASMS_PASSWORD")
         self.session = requests.Session()
-        self.last_sms_ids = set()
+        self.last_sms = {}  # Store last 100 SMS to avoid duplicates
         self.logged_in = False
-        self.session_token = None
+        self.login_attempts = 0
+        self.max_sms_store = 100
         
         # Headers to mimic browser
         self.headers = {
@@ -85,12 +88,14 @@ class IVASMSMonitor:
             
             if response.status_code != 200:
                 logger.error(f"[LOGIN] Failed to get login page: {response.status_code}")
+                self.login_attempts += 1
                 return False
             
             # Extract CSRF token
             token_match = re.search(r'<input type="hidden" name="_token" value="([^"]+)"', response.text)
             if not token_match:
                 logger.error("[LOGIN] Could not find CSRF token")
+                self.login_attempts += 1
                 return False
             
             _token = token_match.group(1)
@@ -122,70 +127,25 @@ class IVASMSMonitor:
             # Check if login successful
             if "dashboard" in login_response.url or "portal" in login_response.url:
                 self.logged_in = True
-                self.session_token = _token
-                logger.info("[LOGIN] ✓ Successfully logged in")
-                
-                # Get dashboard to extract more tokens
-                dashboard = self.session.get("https://www.ivasms.com/portal", headers=self.headers, timeout=30)
-                soup = BeautifulSoup(dashboard.text, 'html.parser')
-                
-                # Find CSRF meta tag
-                csrf_meta = soup.find('meta', {'name': 'csrf-token'})
-                if csrf_meta:
-                    self.session_token = csrf_meta.get('content')
-                
+                self.login_attempts = 0
+                logger.info("[LOGIN]  Successfully logged in")
                 return True
             else:
                 logger.error("[LOGIN] Login failed - check credentials")
+                self.login_attempts += 1
                 return False
                 
         except Exception as e:
             logger.error(f"[LOGIN] Error: {e}")
+            self.login_attempts += 1
             return False
     
-    def check_sms_api(self):
-        """Try to check SMS via API endpoint"""
-        if not self.logged_in and not self.login():
-            return []
+    def check_sms(self):
+        """Check for new SMS messages"""
+        if not self.logged_in:
+            if not self.login():
+                return []
         
-        try:
-            # Try API endpoint first (if available)
-            api_headers = self.headers.copy()
-            api_headers.update({
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json, text/plain, */*',
-                'Referer': 'https://www.ivasms.com/portal/sms/received'
-            })
-            
-            # Common API endpoints to try
-            endpoints = [
-                "https://www.ivasms.com/api/sms",
-                "https://www.ivasms.com/portal/sms/received/getsms",
-                "https://www.ivasms.com/sms/received"
-            ]
-            
-            for endpoint in endpoints:
-                try:
-                    response = self.session.get(endpoint, headers=api_headers, timeout=15)
-                    if response.status_code == 200:
-                        try:
-                            data = response.json()
-                            if isinstance(data, list) and data:
-                                return self.process_api_sms(data)
-                        except:
-                            pass
-                except:
-                    continue
-            
-            # If API fails, fall back to HTML parsing
-            return self.check_sms_html()
-            
-        except Exception as e:
-            logger.error(f"[SMS] API error: {e}")
-            return self.check_sms_html()
-    
-    def check_sms_html(self):
-        """Check SMS via HTML parsing"""
         try:
             # Go to SMS received page
             response = self.session.get(
@@ -201,33 +161,45 @@ class IVASMSMonitor:
             soup = BeautifulSoup(response.text, 'html.parser')
             new_sms = []
             
-            # Method 1: Look for table rows
+            # Method 1: Look for table rows (most common)
             rows = soup.find_all('tr')
             for row in rows:
                 cells = row.find_all('td')
                 if len(cells) >= 3:
-                    row_id = row.get('data-id', str(hash(str(cells))))
+                    # Create unique ID for this SMS
+                    sms_content = ' '.join([c.get_text(strip=True) for c in cells])
+                    sms_id = str(hash(sms_content))
                     
-                    if row_id not in self.last_sms_ids:
-                        self.last_sms_ids.add(row_id)
+                    if sms_id not in self.last_sms:
+                        self.last_sms[sms_id] = datetime.now().isoformat()
+                        
+                        # Clean up old SMS
+                        if len(self.last_sms) > self.max_sms_store:
+                            oldest = min(self.last_sms.keys(), key=lambda k: self.last_sms[k])
+                            del self.last_sms[oldest]
                         
                         sms_data = {
                             'from': cells[0].get_text(strip=True) if len(cells) > 0 else 'Unknown',
                             'message': cells[1].get_text(strip=True) if len(cells) > 1 else 'No message',
-                            'time': cells[2].get_text(strip=True) if len(cells) > 2 else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            'time': cells[2].get_text(strip=True) if len(cells) > 2 else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'id': sms_id
                         }
                         new_sms.append(sms_data)
             
-            # Method 2: Look for div cards
+            # Method 2: Look for div cards if no table rows found
             if not new_sms:
-                cards = soup.find_all('div', class_=re.compile(r'card|sms-item|message'))
+                cards = soup.find_all('div', class_=re.compile(r'card|sms-item|message-item'))
                 for card in cards:
                     card_text = card.get_text(strip=True)
-                    if card_text and len(card_text) > 10:  # Avoid empty cards
-                        card_id = str(hash(card_text[:100]))
+                    if card_text and len(card_text) > 10:
+                        sms_id = str(hash(card_text[:200]))
                         
-                        if card_id not in self.last_sms_ids:
-                            self.last_sms_ids.add(card_id)
+                        if sms_id not in self.last_sms:
+                            self.last_sms[sms_id] = datetime.now().isoformat()
+                            
+                            if len(self.last_sms) > self.max_sms_store:
+                                oldest = min(self.last_sms.keys(), key=lambda k: self.last_sms[k])
+                                del self.last_sms[oldest]
                             
                             # Try to extract sender
                             sender = 'Unknown'
@@ -237,45 +209,25 @@ class IVASMSMonitor:
                             
                             sms_data = {
                                 'from': sender,
-                                'message': card_text[:200] + '...' if len(card_text) > 200 else card_text,
-                                'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                'message': card_text[:300] + '...' if len(card_text) > 300 else card_text,
+                                'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'id': sms_id
                             }
                             new_sms.append(sms_data)
             
             if new_sms:
-                logger.info(f"[SMS] Found {len(new_sms)} new messages via HTML")
+                logger.info(f"[SMS] Found {len(new_sms)} new message(s)")
             
             return new_sms
             
         except Exception as e:
-            logger.error(f"[SMS] HTML parsing error: {e}")
+            logger.error(f"[SMS] Error: {e}")
             return []
-    
-    def process_api_sms(self, data):
-        """Process SMS from API response"""
-        new_sms = []
-        for item in data:
-            sms_id = str(item.get('id', hash(str(item))))
-            
-            if sms_id not in self.last_sms_ids:
-                self.last_sms_ids.add(sms_id)
-                
-                sms_data = {
-                    'from': item.get('sender', item.get('from', 'Unknown')),
-                    'message': item.get('message', item.get('text', 'No message')),
-                    'time': item.get('created_at', item.get('time', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-                }
-                new_sms.append(sms_data)
-        
-        if new_sms:
-            logger.info(f"[SMS] Found {len(new_sms)} new messages via API")
-        
-        return new_sms
     
     def get_stats(self):
         """Get account statistics"""
         if not self.logged_in and not self.login():
-            return "❌ Not logged in"
+            return " Not logged in"
         
         try:
             response = self.session.get("https://www.ivasms.com/portal", headers=self.headers, timeout=30)
@@ -283,19 +235,22 @@ class IVASMSMonitor:
             
             # Try to find balance
             balance = "N/A"
-            balance_elem = soup.find('span', class_='balance')
-            if balance_elem:
-                balance = balance_elem.text.strip()
+            balance_selectors = ['.balance', '.user-balance', '.account-balance', 'span[class*="balance"]']
+            for selector in balance_selectors:
+                elem = soup.select_one(selector)
+                if elem:
+                    balance = elem.text.strip()
+                    break
             
-            # Try to find email
-            email_elem = soup.find('span', class_='email')
-            if not email_elem:
-                email_elem = soup.find('div', string=re.compile(self.email))
+            return f""" **Email:** {self.email}
+ **Balance:** {balance}
+ **SMS Tracked:** {len(self.last_sms)}
+ **Status:** Logged In
+ **Last Check:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
             
-            return f"📧 Email: {self.email}\n💰 Balance: {balance}\n🟢 Status: Logged in"
         except Exception as e:
             logger.error(f"[STATS] Error: {e}")
-            return f"📧 Email: {self.email}\n❌ Could not fetch stats"
+            return f" **Email:** {self.email}\n Could not fetch stats\n SMS Tracked: {len(self.last_sms)}"
 
 # Initialize monitor
 monitor = IVASMSMonitor()
@@ -307,18 +262,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_users.add(user_id)
     
-    welcome_text = """
-👋 **Welcome to IVASMS Monitor Bot!**
+    welcome_text = f"""
+ **Welcome to IVASMS Monitor Bot!**
 
 This bot monitors your IVASMS account and forwards SMS to this chat.
 
-**📱 Commands:**
+** Commands:**
 /status - Check bot status
 /stats - View account statistics
 /check - Manually check for SMS
 /help - Show this help
 
-**📢 Join our channel:** @mrafrixtech
+** Join our channel:** @pyxuss_sms
+
+{get_powered_by()}
 """
     
     await update.message.reply_text(
@@ -329,45 +286,49 @@ This bot monitors your IVASMS account and forwards SMS to this chat.
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = f"""
-**🤖 Bot Status:**
+** Bot Status:**
 
-🟢 **Running:** Yes
-📱 **Logged in:** {'✅ Yes' if monitor.logged_in else '❌ No'}
-📊 **SMS tracked:** {len(monitor.last_sms_ids)}
-👥 **Users:** {len(bot_users)}
+ **Running:** Yes
+ **Logged in:** {' Yes' if monitor.logged_in else ' No'}
+ **SMS Tracked:** {len(monitor.last_sms)}
+ **Users:** {len(bot_users)}
+ **Login Attempts:** {monitor.login_attempts}
 
 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{get_powered_by()}
 """
     await update.message.reply_text(status_text, parse_mode='Markdown')
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔄 Fetching stats...")
+    msg = await update.message.reply_text(" Fetching stats...")
     stats_text = monitor.get_stats()
-    await msg.edit_text(f"**📊 Account Statistics:**\n\n{stats_text}", parse_mode='Markdown')
+    await msg.edit_text(f"** Account Statistics:**\n\n{stats_text}", parse_mode='Markdown')
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔄 Checking for new SMS...")
+    msg = await update.message.reply_text(" Checking for new SMS...")
     
-    sms_list = monitor.check_sms_api()
+    sms_list = monitor.check_sms()
     
     if sms_list:
         for sms in sms_list:
             sms_text = f"""
-📱 **New SMS**
+ **New SMS**
 
-📞 **From:** `{sms['from']}`
-💬 **Message:** 
+ **From:** `{sms['from']}`
+ **Message:** 
 `{sms['message']}`
-🕐 **Time:** {sms['time']}
+ **Time:** {sms['time']}
+
+{get_powered_by()}
 """
             await update.message.reply_text(sms_text, parse_mode='Markdown')
         await msg.delete()
     else:
-        await msg.edit_text("📭 No new SMS messages found.")
+        await msg.edit_text(" No new SMS messages found.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-**📚 Available Commands:**
+    help_text = f"""
+** Available Commands:**
 
 /start - Welcome message
 /status - Check bot status
@@ -375,17 +336,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /check - Manually check SMS
 /help - Show this help
 
-**💡 Tips:**
-• Bot automatically checks for SMS every 30-60 seconds
-• New SMS are forwarded to this chat
-• Contact @jaden_afrix for support
+** Tips:**
+� Bot automatically checks for SMS every 45-90 seconds
+� New SMS are forwarded to this chat
+� Contact admin for support
+
+{get_powered_by()}
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("❌ This command is for admins only.")
+        await update.message.reply_text(" This command is for admins only.")
         return
     
     if not context.args:
@@ -400,15 +363,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=uid,
-                text=f"📢 **Broadcast Message:**\n\n{message}",
+                text=f" **Broadcast Message:**\n\n{message}\n\n{get_powered_by()}",
                 parse_mode='Markdown'
             )
             success += 1
+            await asyncio.sleep(0.1)  # Rate limiting
         except Exception as e:
             logger.error(f"Failed to send to {uid}: {e}")
             failed += 1
     
-    await update.message.reply_text(f"✅ Sent to {success} users\n❌ Failed: {failed}")
+    await update.message.reply_text(f" Sent to {success} users\n Failed: {failed}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
@@ -420,21 +384,31 @@ async def monitor_loop(app):
     
     while True:
         try:
+            # Ensure we're logged in
             if not monitor.logged_in:
-                monitor.login()
+                if monitor.login_attempts < 5:
+                    monitor.login()
+                else:
+                    logger.warning("[MONITOR] Too many failed login attempts, waiting 5 minutes...")
+                    await asyncio.sleep(300)
+                    monitor.login_attempts = 0
+                    continue
             
-            sms_list = monitor.check_sms_api()
+            # Check for new SMS
+            sms_list = monitor.check_sms()
             
             if sms_list:
                 logger.info(f"[MONITOR] Found {len(sms_list)} new SMS")
                 for sms in sms_list:
                     sms_text = f"""
-📱 **New SMS Received**
+ **New SMS Received**
 
-📞 **From:** `{sms['from']}`
-💬 **Message:** 
+ **From:** `{sms['from']}`
+ **Message:** 
 `{sms['message']}`
-🕐 **Time:** {sms['time']}
+ **Time:** {sms['time']}
+
+{get_powered_by()}
 """
                     # Send to all users
                     for user_id in bot_users:
@@ -448,7 +422,7 @@ async def monitor_loop(app):
                         except Exception as e:
                             logger.error(f"Failed to send to {user_id}: {e}")
                     
-                    # Also send to main chat
+                    # Also send to main chat if set
                     chat_id = os.getenv("CHAT_ID")
                     if chat_id:
                         try:
@@ -460,8 +434,8 @@ async def monitor_loop(app):
                         except:
                             pass
             
-            # Random wait between checks (30-90 seconds)
-            wait_time = random.randint(30, 90)
+            # Random wait between checks (45-90 seconds)
+            wait_time = random.randint(45, 90)
             logger.info(f"[MONITOR] Next check in {wait_time}s")
             await asyncio.sleep(wait_time)
             
