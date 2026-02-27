@@ -6,28 +6,13 @@ import logging
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import os
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 import asyncio
-import urllib.parse
-import threading
 import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import sys
-
-# Try selenium with undetected-chromedriver for Cloudflare bypass
-HAS_SELENIUM = False
-try:
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.webdriver.chrome.options import Options
-    import undetected_chromedriver as uc
-    HAS_SELENIUM = True
-    logging.info("[SELENIUM] Selenium with undetected-chromedriver loaded - will use for Cloudflare bypass")
-except ImportError as e:
-    logging.warning(f"[SELENIUM] Selenium not available: {e}")
+import threading
 
 # Set up logging
 logging.basicConfig(
@@ -36,6 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Admin IDs
 ADMIN_IDS = [5326153007]
 bot_users = set()
 
@@ -44,460 +30,367 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        response = b'''<!DOCTYPE html>
+        self.wfile.write(b'''<!DOCTYPE html>
 <html><head><title>IVASMS Bot</title></head>
-<body><h1>IVASMS Bot is running!</h1><p>Status: OK</p></body></html>'''
-        self.wfile.write(response)
-    
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
+<body><h1>IVASMS Bot is running!</h1><p>Status: OK</p></body></html>''')
     
     def log_message(self, format, *args):
         pass
 
 def run_health_server():
-    """Run a simple HTTP server for health checks."""
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    logger.info(f"[HEALTH] Health server listening on 0.0.0.0:{port}")
+    logger.info(f"[HEALTH] Server listening on port {port}")
     server.serve_forever()
+
+# Start health server in background
+health_thread = threading.Thread(target=run_health_server, daemon=True)
+health_thread.start()
 
 BANNER_URL = "https://files.catbox.moe/koc535.jpg"
 
-def get_inline_keyboard():
-    """Return inline keyboard with channel/group buttons - vertical layout."""
+def get_keyboard():
     keyboard = [
-        [InlineKeyboardButton("𝐍ᴜᴍʙᴇʀ 𝐂ʜᴀɴɴᴇʟ", url="https://t.me/mrafrixtech")],
-        [InlineKeyboardButton("𝐎ᴛᴘ 𝐆𝐫𝐨𝐮𝐩", url="https://t.me/afrixotpgc")],
-        [InlineKeyboardButton("𝐑ᴇɴᴛ sᴄʀɪᴘᴛ", url="https://t.me/jaden_afrix")],
+        [InlineKeyboardButton("📢 Channel", url="https://t.me/pyxuss_sms")],
+        [InlineKeyboardButton("👥 Group", url="https://t.me/+sT7TU1EAX_w3ZjFl")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_powered_by_caption():
-    """Return the powered by caption with auto-updated year."""
-    current_year = datetime.now().year
-    return f"©ᴘᴏᴡᴇʀᴇᴅ ʙʏ 𝐀ᴜʀᴏʀᴀ𝐈ɪɴᴄ {current_year}"
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15",
-]
-
-def get_random_headers():
-    """Return random headers to appear as a real browser."""
-    return {
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0',
-    }
-
-class IVASMSBot:
+class IVASMSMonitor:
     def __init__(self):
-        self.email = os.getenv("IVASMS_EMAIL", "")
-        self.password = os.getenv("IVASMS_PASSWORD", "")
-        self.bot_token = os.getenv("BOT_TOKEN", "")
-        self.chat_id = os.getenv("CHAT_ID", "")
+        self.email = os.getenv("IVASMS_EMAIL")
+        self.password = os.getenv("IVASMS_PASSWORD")
         self.session = requests.Session()
-        self.driver = None
-        self.consecutive_failures = 0
-        self.last_sms = {}
+        self.last_sms = set()
+        self.logged_in = False
         
-        if not all([self.email, self.password, self.bot_token, self.chat_id]):
-            logger.error("[INIT] Missing required environment variables!")
-            sys.exit(1)
-    
-    def init_selenium_driver(self):
-        """Initialize Selenium driver with undetected-chromedriver."""
-        if not HAS_SELENIUM:
-            logger.warning("[SELENIUM] Selenium not available, cannot initialize driver")
-            return False
-        
+    def login(self):
+        """Login to IVASMS using requests (no Selenium)"""
         try:
-            logger.info("[SELENIUM] Initializing undetected Chrome driver...")
-            options = uc.ChromeOptions()
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--disable-web-resources")
-            options.add_argument("--disable-features=VizDisplayCompositor")
-            options.add_argument("--headless=new")
-            options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
+            logger.info("[LOGIN] Attempting login...")
             
-            self.driver = uc.Chrome(options=options, version_main=None)
-            logger.info("[SELENIUM] Chrome driver initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"[SELENIUM] Failed to initialize Chrome driver: {e}")
-            self.driver = None
-            return False
-    
-    def selenium_login(self):
-        """Login using Selenium - bypasses Cloudflare properly."""
-        if not HAS_SELENIUM or not self.driver:
-            logger.warning("[SELENIUM] Selenium not available, falling back to requests")
-            return self.requests_login()
-        
-        try:
-            logger.info("[SELENIUM] Starting login with Selenium...")
+            # Get login page for token
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+            }
             
-            # Visit home page first to warm up
-            logger.info("[SELENIUM] Warming up connection...")
-            self.driver.get("https://www.ivasms.com/")
-            time.sleep(random.uniform(2, 4))
+            response = self.session.get("https://www.ivasms.com/login", headers=headers, timeout=30)
             
-            # Navigate to login
-            logger.info("[SELENIUM] Navigating to login page...")
-            self.driver.get("https://www.ivasms.com/login")
-            time.sleep(random.uniform(3, 5))
+            if response.status_code != 200:
+                logger.error(f"[LOGIN] Failed to get login page: {response.status_code}")
+                return False
             
-            # Wait for page to load
-            WebDriverWait(self.driver, 15).until(
-                EC.presence_of_all_elements_located((By.TAG_NAME, "input"))
+            # Extract CSRF token
+            token_match = re.search(r'<input type="hidden" name="_token" value="([^"]+)"', response.text)
+            if not token_match:
+                logger.error("[LOGIN] No CSRF token found")
+                return False
+            
+            _token = token_match.group(1)
+            
+            # Perform login
+            login_data = {
+                "_token": _token,
+                "email": self.email,
+                "password": self.password,
+                "remember": "on",
+                "submit": "register"
+            }
+            
+            login_headers = headers.copy()
+            login_headers.update({
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://www.ivasms.com",
+                "Referer": "https://www.ivasms.com/login"
+            })
+            
+            login_response = self.session.post(
+                "https://www.ivasms.com/login",
+                data=login_data,
+                headers=login_headers,
+                allow_redirects=True,
+                timeout=30
             )
             
-            logger.info("[SELENIUM] Login page loaded, filling form...")
-            
-            # Find email field and type slowly (human-like)
-            email_input = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.NAME, "email"))
-            )
-            for char in self.email:
-                email_input.send_keys(char)
-                time.sleep(random.uniform(0.05, 0.15))
-            
-            time.sleep(random.uniform(1, 2))
-            
-            # Find password field and type slowly
-            password_input = self.driver.find_element(By.NAME, "password")
-            for char in self.password:
-                password_input.send_keys(char)
-                time.sleep(random.uniform(0.05, 0.15))
-            
-            time.sleep(random.uniform(1, 2))
-            
-            # Submit form
-            logger.info("[SELENIUM] Submitting login form...")
-            submit_button = self.driver.find_element(By.XPATH, "//button[@type='submit']")
-            submit_button.click()
-            
-            # Wait for redirect
-            logger.info("[SELENIUM] Waiting for login response...")
-            time.sleep(random.uniform(3, 6))
-            
-            # Check if login was successful
-            current_url = self.driver.current_url
-            if "dashboard" in current_url or "home" in current_url:
-                logger.info("[SELENIUM] ✓ Login successful!")
-                self.consecutive_failures = 0
+            # Check if login successful
+            if "dashboard" in login_response.url or "portal" in login_response.url:
+                self.logged_in = True
+                logger.info("[LOGIN] ✓ Successfully logged in")
                 return True
             else:
-                logger.error("[SELENIUM] Login may have failed - check credentials")
+                logger.error("[LOGIN] Login failed - check credentials")
                 return False
                 
         except Exception as e:
-            logger.error(f"[SELENIUM] Selenium login error: {e}")
-            return False
-    
-    def requests_login(self):
-        """Fallback login using requests with advanced headers."""
-        try:
-            logger.info("[LOGIN] Starting login with requests...")
-            
-            # Warm up - visit homepage
-            logger.info("[LOGIN] Warming up connection...")
-            for attempt in range(3):
-                try:
-                    resp = self.session.get("https://www.ivasms.com/", 
-                                          headers=get_random_headers(),
-                                          timeout=15)
-                    if resp.status_code == 200:
-                        logger.info("[LOGIN] Homepage loaded successfully")
-                        break
-                except Exception as e:
-                    logger.warning(f"[LOGIN] Homepage warmup attempt {attempt+1} failed: {e}")
-                    time.sleep(random.uniform(2, 4))
-            
-            time.sleep(random.uniform(2, 4))
-            
-            # Login attempt
-            for attempt in range(5):
-                try:
-                    logger.info(f"[LOGIN] Login attempt {attempt+1}/5...")
-                    
-                    login_data = {
-                        "email": self.email,
-                        "password": self.password
-                    }
-                    
-                    login_response = self.session.post(
-                        "https://www.ivasms.com/login",
-                        data=login_data,
-                        headers=get_random_headers(),
-                        timeout=20,
-                        allow_redirects=True
-                    )
-                    
-                    if login_response.status_code == 200:
-                        if "dashboard" in login_response.url or "home" in login_response.url or "Logout" in login_response.text:
-                            logger.info("[LOGIN] ✓ Login successful!")
-                            self.consecutive_failures = 0
-                            return True
-                        else:
-                            logger.warning("[LOGIN] Status 200 but not authenticated")
-                    else:
-                        logger.error(f"[LOGIN] Status {login_response.status_code}: {login_response.reason}")
-                        
-                except requests.Timeout:
-                    logger.warning(f"[LOGIN] Timeout on attempt {attempt+1}, retrying...")
-                except requests.RequestException as e:
-                    logger.error(f"[LOGIN] Request error on attempt {attempt+1}: {e}")
-                
-                if attempt < 4:
-                    wait_time = random.uniform(5, 15) * (attempt + 1)
-                    logger.info(f"[LOGIN] Waiting {wait_time:.1f}s before retry...")
-                    time.sleep(wait_time)
-            
-            logger.error("[LOGIN] All login attempts failed")
-            self.consecutive_failures += 1
-            return False
-            
-        except Exception as e:
-            logger.error(f"[LOGIN] Unexpected error: {e}")
-            self.consecutive_failures += 1
+            logger.error(f"[LOGIN] Error: {e}")
             return False
     
     def check_sms(self):
-        """Check for new SMS messages."""
+        """Check for new SMS messages"""
+        if not self.logged_in:
+            if not self.login():
+                return []
+        
         try:
-            logger.info("[SMS] Fetching SMS messages...")
+            # Go to SMS received page
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://www.ivasms.com/portal',
+            }
             
             response = self.session.get(
-                "https://www.ivasms.com/api/sms",
-                headers=get_random_headers(),
-                timeout=15
+                "https://www.ivasms.com/portal/sms/received", 
+                headers=headers, 
+                timeout=30
             )
             
-            if response.status_code == 200:
-                try:
-                    sms_data = response.json()
-                    new_messages = []
-                    
-                    if isinstance(sms_data, list):
-                        for sms in sms_data:
-                            sms_id = sms.get("id", str(random.random()))
-                            if sms_id not in self.last_sms:
-                                new_messages.append(sms)
-                                self.last_sms[sms_id] = True
-                    
-                    if new_messages:
-                        logger.info(f"[SMS] Found {len(new_messages)} new message(s)")
-                        return new_messages
-                    else:
-                        logger.info("[SMS] No new messages")
-                        return []
-                except json.JSONDecodeError:
-                    logger.warning("[SMS] Could not parse JSON response")
-                    return []
-            else:
-                logger.error(f"[SMS] API error: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"[SMS] Failed to get SMS page: {response.status_code}")
                 return []
+            
+            # Parse SMS
+            soup = BeautifulSoup(response.text, 'html.parser')
+            new_sms = []
+            
+            # Look for SMS entries - adjust selectors based on actual HTML
+            sms_elements = soup.find_all('tr', class_='sms-row')
+            if not sms_elements:
+                # Try alternative selectors
+                sms_elements = soup.find_all('div', class_='sms-item')
+            
+            for element in sms_elements:
+                element_text = element.get_text()
+                # Create a simple hash of the SMS to avoid duplicates
+                sms_hash = hash(element_text[:200])
                 
+                if sms_hash not in self.last_sms:
+                    self.last_sms.add(sms_hash)
+                    
+                    # Extract basic info
+                    sms_data = {
+                        'from': 'Unknown',
+                        'message': element_text[:200] + '...' if len(element_text) > 200 else element_text,
+                        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    
+                    # Try to extract sender and message
+                    sender_match = re.search(r'(?:From|Sender)[:\s]+([^\n]+)', element_text)
+                    if sender_match:
+                        sms_data['from'] = sender_match.group(1).strip()
+                    
+                    new_sms.append(sms_data)
+            
+            if new_sms:
+                logger.info(f"[SMS] Found {len(new_sms)} new messages")
+            
+            return new_sms
+            
         except Exception as e:
-            logger.error(f"[SMS] Error checking SMS: {e}")
+            logger.error(f"[SMS] Error: {e}")
             return []
     
-    async def send_telegram_message(self, bot, message_text):
-        """Send message to Telegram."""
+    def get_stats(self):
+        """Get account statistics"""
+        if not self.logged_in:
+            if not self.login():
+                return "Not logged in"
+        
         try:
-            await bot.send_message(
-                chat_id=self.chat_id,
-                text=message_text,
-                parse_mode="HTML"
-            )
-            logger.info("[TELEGRAM] Message sent successfully")
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Error sending message: {e}")
+            response = self.session.get("https://www.ivasms.com/portal", timeout=30)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Try to find balance
+            balance_elem = soup.find('span', class_='balance')
+            balance = balance_elem.text.strip() if balance_elem else "N/A"
+            
+            return f"Email: {self.email}\nBalance: {balance}"
+        except:
+            return "Could not fetch stats"
+
+# Initialize monitor
+monitor = IVASMSMonitor()
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    bot_users.add(user_id)
     
-    async def send_sms_notification(self, bot, sms):
-        """Send SMS notification to Telegram with banner and buttons."""
-        try:
-            # Format message
-            message = f"""
-<b>📱 New SMS Received</b>
+    await update.message.reply_text(
+        "👋 **Welcome to IVASMS Monitor Bot!**\n\n"
+        "This bot monitors your IVASMS account and forwards SMS to this chat.\n\n"
+        "**Commands:**\n"
+        "/status - Check bot status\n"
+        "/stats - View account statistics\n"
+        "/check - Manually check for SMS\n"
+        "/help - Show this help",
+        parse_mode='Markdown',
+        reply_markup=get_keyboard()
+    )
 
-<b>From:</b> {sms.get('sender', 'Unknown')}
-<b>Message:</b> {sms.get('message', 'No content')}
-<b>Time:</b> {sms.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_text = f"🟢 Bot is running\n"
+    status_text += f"📱 Logged in: {'Yes' if monitor.logged_in else 'No'}\n"
+    status_text += f"📊 SMS tracked: {len(monitor.last_sms)}\n"
+    status_text += f"👥 Users: {len(bot_users)}"
+    
+    await update.message.reply_text(status_text)
 
-{get_powered_by_caption()}
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats_text = monitor.get_stats()
+    await update.message.reply_text(f"**Account Stats:**\n{stats_text}", parse_mode='Markdown')
+
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Checking for new SMS...")
+    
+    sms_list = monitor.check_sms()
+    
+    if sms_list:
+        for sms in sms_list:
+            sms_text = f"""
+📱 **New SMS**
+
+📞 **From:** {sms['from']}
+💬 **Message:** `{sms['message']}`
+🕐 **Time:** {sms['time']}
 """
-            
-            # Send with banner
-            with open("src/notification.mp3", "rb") if os.path.exists("src/notification.mp3") else None as audio:
-                await bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=BANNER_URL,
-                    caption=message,
-                    parse_mode="HTML",
-                    reply_markup=get_inline_keyboard()
-                )
-            
-            logger.info("[NOTIFICATION] SMS notification sent")
-            
-        except Exception as e:
-            logger.error(f"[NOTIFICATION] Error sending notification: {e}")
-    
-    async def handle_command(self, update, context):
-        """Handle Telegram commands."""
-        user_id = update.effective_user.id
-        command = update.message.text.split()[0].lower()
-        
-        if command == "/start":
-            await update.message.reply_text(
-                "👋 Welcome to IVASMS Bot!\n\n"
-                "🤖 I monitor your ivasms.com account and notify you about incoming SMS.\n\n"
-                "📝 Commands:\n"
-                "/status - Check bot status\n"
-                "/help - Show this message\n",
-                reply_markup=get_inline_keyboard()
-            )
-        
-        elif command == "/help":
-            await update.message.reply_text(
-                "📖 Available Commands:\n\n"
-                "/start - Welcome message\n"
-                "/status - Bot status\n"
-                "/help - This message\n",
-                reply_markup=get_inline_keyboard()
-            )
-        
-        elif command == "/status":
-            status = "🟢 Online and monitoring" if not self.consecutive_failures else f"🟡 Issues detected ({self.consecutive_failures} failures)"
-            await update.message.reply_text(
-                f"Bot Status: {status}\n"
-                f"Messages tracked: {len(self.last_sms)}\n\n"
-                f"{get_powered_by_caption()}",
-                reply_markup=get_inline_keyboard()
-            )
-        
-        elif command == "/stats" and is_admin(user_id):
-            await update.message.reply_text(
-                f"📊 Admin Stats:\n"
-                f"Messages tracked: {len(self.last_sms)}\n"
-                f"Consecutive failures: {self.consecutive_failures}\n"
-                f"Last check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"{get_powered_by_caption()}",
-                reply_markup=get_inline_keyboard()
-            )
-        
-        elif command == "/broadcast" and is_admin(user_id):
-            if len(context.args) > 0:
-                msg = " ".join(context.args)
-                await bot.send_message(chat_id=self.chat_id, text=msg, reply_markup=get_inline_keyboard())
-                await update.message.reply_text("✓ Broadcast sent!")
-            else:
-                await update.message.reply_text("Usage: /broadcast <message>")
-        
-        elif command == "/restart" and is_admin(user_id):
-            await update.message.reply_text("🔄 Restarting bot...")
-            self.consecutive_failures = 0
-            logger.info("[ADMIN] Bot restarted by admin")
-
-async def main():
-    """Main bot loop."""
-    
-    # Start health server in background
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
-    
-    # Initialize bot
-    bot = Bot(token=os.getenv("BOT_TOKEN"))
-    application = Application.builder().token(os.getenv("BOT_TOKEN")).build()
-    
-    # Initialize IVASMS bot
-    ivasms = IVASMSBot()
-    
-    # Add command handlers
-    application.add_handler(CommandHandler("start", ivasms.handle_command))
-    application.add_handler(CommandHandler("help", ivasms.handle_command))
-    application.add_handler(CommandHandler("status", ivasms.handle_command))
-    application.add_handler(CommandHandler("stats", ivasms.handle_command))
-    application.add_handler(CommandHandler("broadcast", ivasms.handle_command))
-    application.add_handler(CommandHandler("restart", ivasms.handle_command))
-    
-    # Start application
-    await application.initialize()
-    await application.start()
-    
-    # Try Selenium first, fallback to requests
-    if HAS_SELENIUM:
-        if ivasms.init_selenium_driver():
-            login_success = ivasms.selenium_login()
-        else:
-            login_success = ivasms.requests_login()
+            await update.message.reply_text(sms_text, parse_mode='Markdown')
+        await msg.delete()
     else:
-        login_success = ivasms.requests_login()
-    
-    if not login_success:
-        logger.error("[MAIN] Initial login failed - check your credentials")
-        await application.stop()
+        await msg.edit_text("📭 No new SMS messages found.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "**Available Commands:**\n\n"
+        "/start - Welcome message\n"
+        "/status - Bot status\n"
+        "/stats - Account stats\n"
+        "/check - Check SMS now\n"
+        "/help - This message",
+        parse_mode='Markdown'
+    )
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Admin only command")
         return
     
-    logger.info("[MAIN] Bot started successfully - monitoring for SMS...")
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
     
-    # Main monitoring loop
+    message = " ".join(context.args)
+    success = 0
+    failed = 0
+    
+    for uid in bot_users:
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"📢 **Broadcast:**\n\n{message}",
+                parse_mode='Markdown'
+            )
+            success += 1
+        except:
+            failed += 1
+    
+    await update.message.reply_text(f"✅ Sent to {success} users\n❌ Failed: {failed}")
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+
+async def monitor_loop(app):
+    """Background task to monitor SMS"""
+    while True:
+        try:
+            if monitor.logged_in or monitor.login():
+                sms_list = monitor.check_sms()
+                
+                if sms_list:
+                    for sms in sms_list:
+                        sms_text = f"""
+📱 **New SMS Received**
+
+📞 **From:** {sms['from']}
+💬 **Message:** `{sms['message']}`
+🕐 **Time:** {sms['time']}
+"""
+                        # Send to all users
+                        for user_id in bot_users:
+                            try:
+                                await app.bot.send_message(
+                                    chat_id=user_id,
+                                    text=sms_text,
+                                    parse_mode='Markdown'
+                                )
+                            except:
+                                pass
+                        
+                        # Also send to main chat
+                        if os.getenv("CHAT_ID"):
+                            try:
+                                await app.bot.send_message(
+                                    chat_id=os.getenv("CHAT_ID"),
+                                    text=sms_text,
+                                    parse_mode='Markdown'
+                                )
+                            except:
+                                pass
+                
+                # Wait 30-60 seconds between checks
+                await asyncio.sleep(random.randint(30, 60))
+            else:
+                logger.warning("[MONITOR] Not logged in, waiting 60s...")
+                await asyncio.sleep(60)
+                
+        except Exception as e:
+            logger.error(f"[MONITOR] Error: {e}")
+            await asyncio.sleep(60)
+
+async def main():
+    """Main function"""
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        logger.error("BOT_TOKEN not set!")
+        sys.exit(1)
+    
+    # Login initially
+    monitor.login()
+    
+    # Create application
+    application = Application.builder().token(bot_token).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("check", check))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("broadcast", broadcast))
+    
+    application.add_error_handler(error_handler)
+    
+    logger.info("[BOT] Starting...")
+    
+    # Start bot
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Start monitoring loop
+    asyncio.create_task(monitor_loop(application))
+    
+    logger.info("[BOT] Running!")
+    
+    # Keep running
     try:
         while True:
-            try:
-                sms_messages = ivasms.check_sms()
-                
-                if sms_messages:
-                    for sms in sms_messages:
-                        await ivasms.send_sms_notification(bot, sms)
-                
-                # Random interval between checks (30-60 seconds)
-                wait_time = random.uniform(30, 60)
-                logger.info(f"[MAIN] Next check in {wait_time:.1f}s...")
-                await asyncio.sleep(wait_time)
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[MAIN] Error in monitoring loop: {e}")
-                ivasms.consecutive_failures += 1
-                
-                if ivasms.consecutive_failures >= 10:
-                    logger.error("[MAIN] Too many failures, attempting re-login...")
-                    if HAS_SELENIUM and ivasms.driver:
-                        ivasms.selenium_login()
-                    else:
-                        ivasms.requests_login()
-                    ivasms.consecutive_failures = 0
-                
-                await asyncio.sleep(random.uniform(60, 120))
-    
+            await asyncio.sleep(3600)
     except KeyboardInterrupt:
-        logger.info("[MAIN] Bot interrupted by user")
-    
-    finally:
-        if ivasms.driver:
-            ivasms.driver.quit()
+        logger.info("[BOT] Shutting down...")
         await application.stop()
 
 if __name__ == "__main__":
